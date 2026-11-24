@@ -595,7 +595,7 @@ impl Sim {
                     _ => [255; 3],
                 };
                 if !matches!(pp.prompt, Prompt::Menu { .. }) {
-                    rounded(&mut px, frect(w), 6.0, [51, 65, 85]);
+                    rounded(&mut px, frect(w), 6.0, crate::render::field_bg(color, true));
                     let shown = match (&pp.prompt, pp.typed.is_empty()) {
                         (Prompt::Clock, true) => "YYMMDDhhmm or hhmm".to_string(),
                         _ => format!("{}_", pp.typed),
@@ -828,6 +828,7 @@ mod tests {
             cfg: None,
             unicode_lib: 24,
             unicode_max: 0x052F,
+            theme: Default::default(),
             pages: vec![
                 Page { name: "a".into(), bg: [0; 3], bg_image: None, swipe: (None, None), widgets: vec![
                     Widget::new(kind("Button"), "key", 0, 0),          // VP 0x1000, key 1

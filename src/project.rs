@@ -36,6 +36,92 @@ pub struct Project {
     pub unicode_lib: u8,
     #[serde(default = "unicode_max")]
     pub unicode_max: u32,
+    /// Colors for the screens: new widgets get them, "Apply to all screens" repaints.
+    #[serde(default)]
+    pub theme: ScreenTheme,
+}
+
+/// Colors of the designed screens by role (not the editor's look: that is `theme.rs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenTheme {
+    pub name: String,
+    /// Page background.
+    pub bg: Rgb,
+    /// Panels, list / roller / dropdown backgrounds, chart and drawing areas.
+    pub surface: Rgb,
+    /// Button fill, toggle on, slider knob, chart line.
+    pub button: Rgb,
+    pub button_pressed: Rgb,
+    pub button_text: Rgb,
+    /// Highlight: progress fill, selected list row, lamp on, gauge needle.
+    pub accent: Rgb,
+    /// Big labels (>= 28 px), numbers, clock.
+    pub heading: Rgb,
+    /// Small labels, text boxes, list / roller / dropdown text.
+    pub text: Rgb,
+    /// Tracks, borders, off states, dials.
+    pub muted: Rgb,
+}
+
+fn hex(c: u32) -> Rgb {
+    [(c >> 16) as u8, (c >> 8) as u8, c as u8]
+}
+
+impl Default for ScreenTheme {
+    fn default() -> Self {
+        ScreenTheme::presets().remove(0)
+    }
+}
+
+impl ScreenTheme {
+    pub fn presets() -> Vec<ScreenTheme> {
+        vec![
+            // the colors UWIN Studio always used
+            ScreenTheme {
+                name: "Dark".into(),
+                bg: hex(0x0F172A), surface: hex(0x1E293B), button: hex(0x2563EB), button_pressed: hex(0x1D4ED8),
+                button_text: hex(0xFFFFFF), accent: hex(0x22C55E), heading: hex(0xFFFFFF), text: hex(0xCBD5E1),
+                muted: hex(0x334155),
+            },
+            ScreenTheme {
+                name: "Teal light".into(),
+                bg: hex(0xF5F7F7), surface: hex(0xFFFFFF), button: hex(0x048478), button_pressed: hex(0x036A60),
+                button_text: hex(0xFFFFFF), accent: hex(0x66B19B), heading: hex(0x474A4F), text: hex(0x6D6E70),
+                muted: hex(0xD5DADC),
+            },
+        ]
+    }
+
+    /// Recolor a widget by role. Pictures (Image, Icons, Animation) and QR codes keep their look.
+    pub fn paint(&self, kind: &mut WidgetKind) {
+        match kind {
+            WidgetKind::Label { size, color, .. } => *color = if *size >= 28.0 { self.heading } else { self.text },
+            WidgetKind::Panel { color, .. } => *color = self.surface,
+            WidgetKind::Button { fg, bg, pressed_bg, .. } => (*fg, *bg, *pressed_bg) = (self.button_text, self.button, self.button_pressed),
+            WidgetKind::Number { color, .. } | WidgetKind::Clock { color, .. } => *color = self.heading,
+            WidgetKind::Text { color, .. } => *color = self.text,
+            WidgetKind::Toggle { on, off, knob, .. } => (*on, *off, *knob) = (self.button, self.muted, self.surface),
+            WidgetKind::Lamp { on, off, .. } => (*on, *off) = (self.accent, self.muted),
+            WidgetKind::Slider { track, knob, .. } => (*track, *knob) = (self.muted, self.button),
+            WidgetKind::List { fg, bg, sel, .. } => (*fg, *bg, *sel) = (self.heading, self.surface, self.accent),
+            WidgetKind::Roller { fg, bg, .. } | WidgetKind::Dropdown { fg, bg, .. } => (*fg, *bg) = (self.heading, self.surface),
+            WidgetKind::Progress { fg, bg, border, .. } => (*fg, *bg, *border) = (self.accent, self.muted, self.muted),
+            WidgetKind::Gauge { needle, dial, .. } => (*needle, *dial) = (self.accent, self.muted),
+            WidgetKind::Chart { color, bg, .. } => (*color, *bg) = (self.button, self.surface),
+            WidgetKind::Drawing { bg, .. } => *bg = self.surface,
+            WidgetKind::Image { .. } | WidgetKind::Icons { .. } | WidgetKind::Animation { .. } | WidgetKind::Qr { .. } => {}
+        }
+    }
+
+    /// Every page background and widget in the project.
+    pub fn apply(&self, p: &mut Project) {
+        for page in &mut p.pages {
+            page.bg = self.bg;
+            for w in &mut page.widgets {
+                self.paint(&mut w.kind);
+            }
+        }
+    }
 }
 
 fn unicode_lib() -> u8 {
@@ -430,6 +516,7 @@ impl Default for Project {
             cfg: None,
             unicode_lib: unicode_lib(),
             unicode_max: unicode_max(),
+            theme: ScreenTheme::default(),
             pages: vec![Page { name: "home".into(), bg: [15, 23, 42], bg_image: None, swipe: (None, None), widgets: vec![] }],
         }
     }

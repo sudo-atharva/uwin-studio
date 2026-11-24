@@ -1023,6 +1023,7 @@ mod tests {
             cfg: None,
             unicode_lib: 24,
             unicode_max: 0x052F,
+            theme: Default::default(),
             pages: vec![
                 Page { name: "home".into(), bg: [10, 20, 30], bg_image: None, swipe: (None, None), widgets: vec![
                     Widget::new(palette("Button"), "start", 20, 20),

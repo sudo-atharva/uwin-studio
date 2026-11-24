@@ -91,6 +91,18 @@ pub(crate) fn frect(w: &Widget) -> (f32, f32, f32, f32) {
     (w.x as f32, w.y as f32, w.w as f32, w.h as f32)
 }
 
+/// Box behind a tap-to-edit field: dark behind light text, light behind dark text (light
+/// screen themes). `editing` = a bit stronger while the keypad is open.
+pub fn field_bg(text: Rgb, editing: bool) -> Rgb {
+    let light_text = text[0] as u32 * 299 + text[1] as u32 * 587 + text[2] as u32 * 114 > 128_000;
+    match (light_text, editing) {
+        (true, false) => [30, 41, 59],
+        (true, true) => [51, 65, 85],
+        (false, false) => [232, 237, 236],
+        (false, true) => [214, 222, 220],
+    }
+}
+
 /// Text of the widget's height, left / centred / right in its box.
 pub fn aligned(px: &mut Pixmap, s: &str, w: &Widget, align: crate::project::Align, color: Rgb) {
     let size = w.h as f32;
@@ -379,12 +391,12 @@ pub fn render(page: &Page, width: u16, height: u16, mode: Mode, base: &Path) -> 
                 draw_state(&mut px, w, 0, base)
             }
             // Editable fields get a box so the operator sees where to tap.
-            WidgetKind::Number { input: Some(_), .. } | WidgetKind::Text { input: true, .. } if mode != Mode::Preview => {
-                rounded(&mut px, frect(w), 6.0, [30, 41, 59]);
+            WidgetKind::Number { input: Some(_), color, .. } | WidgetKind::Text { input: true, color, .. } if mode != Mode::Preview => {
+                rounded(&mut px, frect(w), 6.0, field_bg(*color, false));
             }
             WidgetKind::Number { int_digits, dec_digits, color, input, align, .. } if mode == Mode::Preview => {
                 if input.is_some() {
-                    rounded(&mut px, frect(w), 6.0, [30, 41, 59]);
+                    rounded(&mut px, frect(w), 6.0, field_bg(*color, false));
                 }
                 let mut s = "8".repeat(*int_digits as usize);
                 if *dec_digits > 0 {
@@ -394,7 +406,7 @@ pub fn render(page: &Page, width: u16, height: u16, mode: Mode, base: &Path) -> 
             }
             WidgetKind::Text { color, input, align, .. } if mode == Mode::Preview => {
                 if *input {
-                    rounded(&mut px, frect(w), 6.0, [30, 41, 59]);
+                    rounded(&mut px, frect(w), 6.0, field_bg(*color, false));
                 }
                 // as the MCU will send it: padded to the box by ui_align_text
                 aligned(&mut px, &w.name, w, *align, *color)

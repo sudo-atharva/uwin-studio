@@ -4,7 +4,7 @@
 //! canvas center (zoom, pan, multi-select, align), inspector right, address map bottom.
 
 use uwin_studio::build::{allocate, build, Alloc, Output};
-use uwin_studio::project::{default_widgets, Align as TextAlign, Event, Page, Project, Widget, WidgetKind, PRESETS};
+use uwin_studio::project::{default_widgets, Align as TextAlign, Event, Page, Project, ScreenTheme, Widget, WidgetKind, PRESETS};
 use uwin_studio::render::{load_image, render, Mode};
 use uwin_studio::sim::Sim;
 use uwin_studio::snap::{lines, snap_axis};
@@ -1075,6 +1075,38 @@ impl App {
             ui.label(RichText::new("DGUS default: pages 32.icl. Use what your screen's firmware expects (e.g. 23 / 32 pages, 41-48 icons).").weak().small());
         });
 
+        CollapsingHeader::new("SCREEN COLORS").default_open(false).show(ui, |ui| {
+            let t = &mut self.project.theme;
+            egui::ComboBox::from_id_salt("screen_theme").selected_text(t.name.clone()).show_ui(ui, |ui| {
+                for preset in ScreenTheme::presets() {
+                    if ui.selectable_label(t.name == preset.name, &preset.name).clicked() {
+                        *t = preset;
+                    }
+                }
+            });
+            egui::Grid::new("screen_colors").num_columns(2).show(ui, |ui| {
+                let before = t.clone();
+                color_row(ui, "Background", &mut t.bg);
+                color_row(ui, "Panels / boxes", &mut t.surface);
+                color_row(ui, "Button", &mut t.button);
+                color_row(ui, "Button pressed", &mut t.button_pressed);
+                color_row(ui, "Button text", &mut t.button_text);
+                color_row(ui, "Highlight", &mut t.accent);
+                color_row(ui, "Heading text", &mut t.heading);
+                color_row(ui, "Sub-heading text", &mut t.text);
+                color_row(ui, "Tracks / off", &mut t.muted);
+                if *t != before && !t.name.ends_with(" (edited)") {
+                    t.name += " (edited)";
+                }
+            });
+            ui.label(RichText::new("New widgets get these colors. Labels from 28 px use the heading color.").weak().small());
+            if ui.button("Apply to all screens").on_hover_text("Repaint every screen and widget with these colors (Ctrl+Z undoes it)").clicked() {
+                let theme = self.project.theme.clone();
+                theme.apply(&mut self.project);
+                self.rendered = None;
+            }
+        });
+
         CollapsingHeader::new("SCREEN SIZE").default_open(false).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.project.width).range(16..=4096));
@@ -1187,7 +1219,9 @@ impl App {
                         let label = format!("{} {name}", kind_icon(kind));
                         if ui.add_sized([108.0, 26.0], egui::Button::new(label)).clicked() {
                             let (cx, cy) = (self.project.width as i32 / 2 - 60, self.project.height as i32 / 2 - 30);
-                            self.add_widget(Widget::new(kind.clone(), "", cx, cy));
+                            let mut kind = kind.clone();
+                            self.project.theme.paint(&mut kind); // in the project's screen colors
+                            self.add_widget(Widget::new(kind, "", cx, cy));
                         }
                         if i % 2 == 1 {
                             ui.end_row();

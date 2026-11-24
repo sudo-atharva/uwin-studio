@@ -51,6 +51,10 @@ that does the whole job, in an editor that feels like VS Code or EEZ Studio.
   arrives. The UART log says what each frame means (`write VP 0x1000 temp = 42`, `page → 2`),
   shows text the MCU prints (debug output) instead of dropping it, and skips noise and
   half frames instead of getting stuck on them.
+- **Screen colors (themes):** PROJECT → SCREEN COLORS sets the colors of your screens by role
+  (background, panels, button, highlight, heading and sub-heading text, tracks). Presets: Dark and
+  Teal light; new widgets get them, *Apply to all screens* repaints an existing design. Over MCP:
+  `set_theme`.
 - **Text alignment:** Labels, Numbers and Text boxes can be left, centred or right. Numbers use
   the screen's own alignment; for Text (which DWIN can't align) `ui_gen.h` gets
   `ui_align_text()` and the box width in characters, so the MCU pads the text.
@@ -177,6 +181,7 @@ Then ask, for example:
 | `new_project`, `open_project`, `get_project`, `set_project` | create, load, read, or replace a whole project |
 | `widget_types` | widget types and their properties (`type` for one type's defaults) |
 | `add_screen`, `update_screen`, `remove_screen` | screens, backgrounds, swipe targets |
+| `set_theme` | screen colors by role (preset or `#rrggbb`); `apply` repaints every screen |
 | `add_widget`, `update_widget`, `remove_widget` | widgets: position, size, text, colors, button actions, comments; a whole screen in one call with `widgets: [...]` |
 | `build` | writes `DWIN_SET`, `ui_map.txt`, `ui_gen.h` and returns warnings (`map: true` adds the address map) |
 | `screenshot` | picture of a screen or the running simulator (640 px unless `full: true`) |

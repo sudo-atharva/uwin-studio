@@ -3,7 +3,7 @@
 //! JSON-RPC 2.0 over stdio, one message per line.
 
 use crate::build::build;
-use crate::project::{default_widgets, Page, Project, Widget, WidgetKind};
+use crate::project::{default_widgets, Page, Project, ScreenTheme, Widget, WidgetKind};
 use crate::render::{render, to_image, Mode};
 use crate::sim::Sim;
 use serde_json::{json, Value};
@@ -20,6 +20,7 @@ Keep calls few (each answer costs tokens):
    - On/off: "On/Off Button". +/-: "+ / − Button" with {"event": {"Adjust": {"target": "<number widget>", "step": 1, "min": 0, "max": 100, "wrap": false, "repeat": true}}}.
    - MCU shows: Number, Text, Progress, Gauge, Lamp, Icons. User enters: Number Input, Text Input, Toggle, Slider, Knob, Dropdown, List, Roller.
    - Text position: Label, Number and Text take props {"align": "Left" | "Center" | "Right"}.
+   - Colors: set_theme once (a preset, or per-role colors like #048478) before adding widgets; they then get the theme's colors.
    - Unique snake_case names (they become C #defines); a short "comment" on each MCU widget. Leave "vp" null. Colors [r, g, b].
    - Text boxes fit about 2*w/h characters. Layout: ~24 px margins, a grid, touch targets >= 60 px tall, nav buttons in the same place on every screen.
 4. screenshot once per screen at the end (not after every change); fix with update_widget (also takes a "widgets" list).
@@ -84,7 +85,10 @@ fn tools() -> Vec<Value> {
         tool("set_project", "Replace the whole project with this JSON (same format as get_project full=true). Fastest way to create many screens at once.",
             json!({"project": {"type": "object"}}), &["project"]),
         tool("widget_types", "Widget types with size and settable props; type=\"Button\" gives that type's defaults.", json!({"type": {"type": "string"}}), &[]),
-        tool("add_screen", "Add a screen; returns its index (used by button goto).", json!({
+        tool("set_theme", "Screen colors by role (preset \"Dark\" or \"Teal light\", or colors as \"#rrggbb\" / [r,g,b]); new widgets use them; apply=true repaints every screen.", json!({
+            "preset": {"type": "string"}, "apply": {"type": "boolean"},
+            "bg": {}, "surface": {}, "button": {}, "button_pressed": {}, "button_text": {}, "accent": {}, "heading": {}, "text": {}, "muted": {}}), &[]),
+        tool("add_screen", "Add a screen (background = theme's unless bg given); returns its index (used by button goto).", json!({
             "name": {"type": "string"}, "bg": {"type": "array", "items": {"type": "integer"}, "description": "Background [r,g,b]"}}), &["name"]),
         tool("update_screen", "Rename a screen, change its background, or set which screens a finger swipe opens.", json!({
             "screen": screen, "name": {"type": "string"}, "bg": {"type": "array", "items": {"type": "integer"}},
@@ -157,6 +161,13 @@ fn merge_kind(kind: &WidgetKind, props: &Value) -> Result<WidgetKind, String> {
 
 fn int(a: &Value, k: &str) -> Option<i32> {
     a.get(k).and_then(Value::as_i64).map(|v| v as i32)
+}
+
+/// "#048478" or "048478"
+fn parse_hex(s: &str) -> Option<[u8; 3]> {
+    let h = s.trim().trim_start_matches('#');
+    let v = u32::from_str_radix(h, 16).ok().filter(|_| h.len() == 6)?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
 
 fn rgb(v: &Value) -> Option<[u8; 3]> {
@@ -270,6 +281,8 @@ impl Server {
                 return Err(format!("unknown type '{ty}'; types: {}, Image", names.join(", ")));
             }
         };
+        let mut kind = kind;
+        self.project.theme.paint(&mut kind); // project's screen colors first, props override them
         let kind = merge_kind(&kind, &item["props"])?;
         let mut w = Widget::new(kind, &name, int(item, "x").unwrap_or(0), int(item, "y").unwrap_or(0));
         w.w = int(item, "w").unwrap_or(w.w);
@@ -360,9 +373,32 @@ impl Server {
                 }
                 out
             }
+            "set_theme" => {
+                if let Some(n) = s(a, "preset") {
+                    self.project.theme = ScreenTheme::presets().into_iter().find(|t| t.name.eq_ignore_ascii_case(&n)).ok_or_else(|| {
+                        let names: Vec<_> = ScreenTheme::presets().into_iter().map(|t| t.name).collect();
+                        format!("no preset '{n}'; presets: {}", names.join(", "))
+                    })?;
+                }
+                let t = &mut self.project.theme;
+                for (k, c) in [("bg", &mut t.bg), ("surface", &mut t.surface), ("button", &mut t.button), ("button_pressed", &mut t.button_pressed),
+                    ("button_text", &mut t.button_text), ("accent", &mut t.accent), ("heading", &mut t.heading), ("text", &mut t.text), ("muted", &mut t.muted)] {
+                    if let Some(v) = rgb(&a[k]).or_else(|| s(a, k).and_then(|h| parse_hex(&h))) {
+                        *c = v;
+                    }
+                }
+                if a["apply"].as_bool() == Some(true) {
+                    let theme = self.project.theme.clone();
+                    theme.apply(&mut self.project);
+                }
+                let t = &self.project.theme;
+                format!("theme '{}': bg {:?} surface {:?} button {:?} accent {:?} heading {:?} text {:?} muted {:?}{}{}",
+                    t.name, t.bg, t.surface, t.button, t.accent, t.heading, t.text, t.muted,
+                    if a["apply"].as_bool() == Some(true) { "; all screens repainted" } else { "; new widgets and screens use it" }, self.save()?)
+            }
             "add_screen" => {
                 let name = s(a, "name").ok_or("name missing")?;
-                let bg = rgb(&a["bg"]).unwrap_or([15, 23, 42]);
+                let bg = rgb(&a["bg"]).unwrap_or(self.project.theme.bg);
                 self.project.pages.push(Page { name: name.clone(), bg, bg_image: None, swipe: (None, None), widgets: vec![] });
                 format!("added screen {} '{name}'{}", self.project.pages.len() - 1, self.save()?)
             }
