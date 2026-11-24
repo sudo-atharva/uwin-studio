@@ -4,13 +4,13 @@
 //! canvas center (zoom, pan, multi-select, align), inspector right, address map bottom.
 
 use uwin_studio::build::{allocate, build, Alloc, Output};
-use uwin_studio::project::{default_widgets, Event, Page, Project, Widget, WidgetKind, PRESETS};
+use uwin_studio::project::{default_widgets, Align as TextAlign, Event, Page, Project, Widget, WidgetKind, PRESETS};
 use uwin_studio::render::{load_image, render, Mode};
 use uwin_studio::sim::Sim;
 use uwin_studio::snap::{lines, snap_axis};
 use std::io::{Read, Write};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, CollapsingHeader, Key, PointerButton, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -235,6 +235,8 @@ struct App {
     assets: Vec<String>,
     thumbs: HashMap<String, egui::TextureHandle>,
     texture: Option<egui::TextureHandle>,
+    /// Simulator picture last drawn: (state it showed, when).
+    sim_drawn: Option<(u64, Instant)>,
     rendered: Option<(Page, u16, u16, bool)>,
     status: String,
     title: String,
@@ -275,6 +277,7 @@ impl App {
             assets: vec![],
             thumbs: HashMap::new(),
             texture: None,
+            sim_drawn: None,
             rendered: None,
             status: "New project - save it to start importing images".into(),
             title: String::new(),
@@ -738,6 +741,7 @@ impl App {
         let mut s = Sim::new(&self.project);
         s.page = self.page;
         self.sim = Some(s);
+        self.sim_drawn = None; // draw the simulator's first frame at once
         self.drag = None;
         self.refresh_ports();
     }
@@ -796,6 +800,7 @@ impl App {
                 sim.feed(&b);
             }
         }
+        sim.tick();
         for f in sim.out.drain(..) {
             if let Some(p) = &mut self.port {
                 if p.write_all(&f).is_err() {
@@ -846,11 +851,18 @@ impl App {
             sim.release(&self.project, x);
         }
 
-        let px = sim.render(&self.project, &base);
-        let img = egui::ColorImage::from_rgba_premultiplied([px.width() as usize, px.height() as usize], px.data());
-        match &mut self.texture {
-            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-            None => self.texture = Some(ui.ctx().load_texture("page", img, egui::TextureOptions::LINEAR)),
+        // Draw the page again only when something on it changed (at most ~30 times a second), and
+        // every 100 ms for clocks and animations: a busy MCU link no longer redraws on every byte.
+        let key = sim.state_key();
+        let age = self.sim_drawn.map_or(u128::MAX, |(_, t)| t.elapsed().as_millis());
+        if self.texture.is_none() || age >= 100 || (self.sim_drawn.is_some_and(|(k, _)| k != key) && age >= 33) {
+            let px = sim.render(&self.project, &base);
+            let img = egui::ColorImage::from_rgba_premultiplied([px.width() as usize, px.height() as usize], px.data());
+            match &mut self.texture {
+                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                None => self.texture = Some(ui.ctx().load_texture("page", img, egui::TextureOptions::LINEAR)),
+            }
+            self.sim_drawn = Some((key, Instant::now()));
         }
         self.rendered = None; // editor view re-renders when we leave
         let painter = ui.painter_at(area);
@@ -912,13 +924,22 @@ impl App {
         });
         ui.separator();
         let Some(sim) = &self.sim else { return };
-        egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
-            for l in &sim.log {
-                let c = if l.starts_with('→') { Color32::from_rgb(250, 180, 40) } else { Color32::from_rgb(96, 165, 250) };
+        if sim.log.is_empty() {
+            ui.label(RichText::new("Touch the screen to see frames. → = screen to MCU, ← = MCU to screen. Text the MCU prints (debug) shows up here too.").weak());
+            return;
+        }
+        // only the visible rows are laid out: a long log stays fast
+        let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show_rows(ui, row_h, sim.log.len(), |ui, rows| {
+            for l in &sim.log[rows] {
+                let c = if l.starts_with('→') {
+                    Color32::from_rgb(250, 180, 40)
+                } else if l.contains("not a DWIN frame") || l.contains("dropped") {
+                    Color32::from_rgb(244, 114, 182)
+                } else {
+                    Color32::from_rgb(96, 165, 250)
+                };
                 ui.label(RichText::new(l).monospace().color(c));
-            }
-            if sim.log.is_empty() {
-                ui.label(RichText::new("Touch the screen to see frames. → = screen to MCU, ← = MCU to screen.").weak());
             }
         });
     }
@@ -1295,10 +1316,11 @@ impl App {
             // On the screen each character is about half the text height wide.
             let fits = (2 * w.w / w.h.max(1)).max(1);
             egui::Grid::new("style").num_columns(2).show(ui, |ui| match &mut w.kind {
-                WidgetKind::Label { text, size, color } => {
+                WidgetKind::Label { text, size, color, align } => {
                     text_row(ui, "Text", text);
                     size_row(ui, size);
                     color_row(ui, "Color", color);
+                    align_row(ui, align, "Text position inside the box");
                 }
                 WidgetKind::Panel { color, radius } => {
                     color_row(ui, "Color", color);
@@ -1329,10 +1351,11 @@ impl App {
                         radius_row(ui, radius);
                     }
                 }
-                WidgetKind::Number { int_digits, dec_digits, color, input, smooth, .. } => {
+                WidgetKind::Number { int_digits, dec_digits, color, input, smooth, align, .. } => {
                     drag_row(ui, "Integer digits", int_digits, 1..=10);
                     drag_row(ui, "Decimals", dec_digits, 0..=5);
                     color_row(ui, "Color", color);
+                    align_row(ui, align, "Digits inside the box (uses the screen's own number alignment)");
                     ui.label("Font size");
                     ui.label("= height (H)");
                     ui.end_row();
@@ -1350,9 +1373,10 @@ impl App {
                     ui.checkbox(smooth, "smooth (image digits)").on_hover_text("Digits drawn with this editor's font instead of the screen's built-in one");
                     ui.end_row();
                 }
-                WidgetKind::Text { len, color, input, scroll, unicode, .. } => {
+                WidgetKind::Text { len, color, input, scroll, unicode, align, .. } => {
                     drag_row(ui, "Max bytes", len, 1..=255);
                     color_row(ui, "Color", color);
+                    align_row(ui, align, "DWIN text boxes can't align by themselves: the MCU pads the text with spaces.                         ui_gen.h has ui_align_text() for that, and NAME_COLS for the box width in characters");
                     ui.label("Font size");
                     ui.label("= height (H)");
                     ui.end_row();
@@ -1866,6 +1890,16 @@ impl App {
 fn text_row(ui: &mut egui::Ui, label: &str, s: &mut String) {
     ui.label(label);
     ui.text_edit_singleline(s);
+    ui.end_row();
+}
+
+fn align_row(ui: &mut egui::Ui, align: &mut TextAlign, hint: &str) {
+    ui.label("Align").on_hover_text(hint);
+    ui.horizontal(|ui| {
+        for a in TextAlign::ALL {
+            ui.selectable_value(align, a, a.name()).on_hover_text(hint);
+        }
+    });
     ui.end_row();
 }
 

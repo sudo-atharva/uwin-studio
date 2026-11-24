@@ -8,7 +8,7 @@
 use crate::control::{show_record, Kind, Params, Value, SHOW_KINDS, TOUCH_KINDS};
 use crate::icl::{Icl, Icon};
 use crate::picture;
-use crate::project::{button, Event, Page, Project, Rgb, Widget, WidgetKind};
+use crate::project::{button, Align, Event, Page, Project, Rgb, Widget, WidgetKind};
 use crate::render::{gauge_geom, icon, needle_icon, render, text, text_width, to_image, Mode};
 use crate::set::DwinSet;
 use crate::show::ShowFile;
@@ -378,13 +378,19 @@ pub fn build(p: &Project, base: &Path) -> Result<Output, Box<dyn std::error::Err
                     }
                     touch.push(rec);
                 }
-                WidgetKind::Number { int_digits, dec_digits, color, input, smooth, .. } => {
+                WidgetKind::Number { int_digits, dec_digits, color, input, smooth, align, .. } => {
                     // ASCII font: size = character width, height is twice that.
                     let font = (w.h / 2).clamp(1, 255) as u32;
+                    // The screen aligns the digits inside the number field (digits wide, (x, y) = its
+                    // top-left); place that field in the box the same way, so the digits sit left /
+                    // centred / right in the box whatever their count.
+                    let chars = *int_digits as u32 + if *dec_digits > 0 { *dec_digits as u32 + 1 } else { 0 };
+                    let field_x = |char_w: u32| align.place(x0 as f32, w.w as f32, (chars * char_w) as f32) as u32;
                     let params: Params = vec![
-                        ("sp", n(a.unwrap().sp.unwrap() as u32)), ("vp", vp()), ("x", n(x0)), ("y", n(y0)),
+                        ("sp", n(a.unwrap().sp.unwrap() as u32)), ("vp", vp()), ("x", n(field_x(font))), ("y", n(y0)),
                         ("color", n(rgb565(*color))), ("font_size", n(font)),
                         ("int_digits", n(*int_digits as u32)), ("dec_digits", n(*dec_digits as u32)),
+                        ("align", n(dgus_align(*align))),
                     ];
                     if *smooth {
                         // Digits pre-rendered with the editor font: '0'..'9', '-', '.' in one row of icons.
@@ -399,9 +405,10 @@ pub fn build(p: &Project, base: &Path) -> Result<Output, Box<dyn std::error::Err
                             icons.add(&px)?;
                         }
                         let params: Params = vec![
-                            ("sp", n(a.unwrap().sp.unwrap() as u32)), ("vp", vp()), ("x", n(x0)), ("y", n(y0)),
+                            ("sp", n(a.unwrap().sp.unwrap() as u32)), ("vp", vp()), ("x", n(field_x(cw as u32))), ("y", n(y0)),
                             ("icon0", n(first)), ("lib", n(ilib)),
                             ("int_digits", n(*int_digits as u32)), ("dec_digits", n(*dec_digits as u32)),
+                            ("align", n(dgus_align(*align))),
                         ];
                         shows.push(show_record(kind(SHOW_KINDS, "art_number"), &params));
                     } else {
@@ -814,9 +821,63 @@ fn header(p: &Project, allocs: &[Alloc]) -> String {
         if let WidgetKind::Button { event: Event::Key { key, .. }, .. } = &w.kind {
             writeln!(h, "#define KEY_{name:<25} {key:#06x}").unwrap();
         }
+        if let WidgetKind::Text { unicode: false, scroll: false, align, len, .. } = &w.kind {
+            // the screen can't align text in its box: the MCU pads it (ui_align_text below);
+            // never more than the VP holds, or the padding would run into the next variable
+            let cols = text_cols(w).min(*len as i32);
+            writeln!(h, "#define COLS_{name:<24} {cols}  // characters that fit in the box (and in the VP)").unwrap();
+            if *align != Align::Left {
+                writeln!(h, "#define ALIGN_{name:<23} {}  // {}: send ui_align_text(buf, text, COLS_{name}, ALIGN_{name})",
+                    align_code(*align), align.name()).unwrap();
+            }
+        }
+    }
+    let aligned = p.pages.iter().flat_map(|pg| &pg.widgets)
+        .any(|w| matches!(&w.kind, WidgetKind::Text { unicode: false, scroll: false, align, .. } if *align != Align::Left));
+    if aligned {
+        h += ALIGN_HELPER;
     }
     h
 }
+
+/// Characters of the built-in ASCII font that fit in a text box (each is about half the height wide).
+pub fn text_cols(w: &Widget) -> i32 {
+    (2 * w.w / w.h.max(1)).max(1)
+}
+
+/// The screen's number alignment byte: 0 left, 1 right, 2 centre (see import::dgus_align).
+fn dgus_align(a: Align) -> u32 {
+    match a {
+        Align::Left => 0,
+        Align::Right => 1,
+        Align::Center => 2,
+    }
+}
+
+/// ALIGN_ values in ui_gen.h (0 left, 1 centre, 2 right).
+fn align_code(a: Align) -> u8 {
+    match a {
+        Align::Left => 0,
+        Align::Center => 1,
+        Align::Right => 2,
+    }
+}
+
+const ALIGN_HELPER: &str = r#"
+// DWIN text boxes have no alignment of their own: pad the text with spaces before sending it.
+// buf needs cols + 1 bytes. The trailing spaces also clear what was there before.
+// e.g. ui_align_text(buf, "Ready", COLS_STATUS, ALIGN_STATUS);  then send cols bytes of buf to VP_STATUS
+static inline char *ui_align_text(char *buf, const char *s, unsigned cols, unsigned align) {
+    unsigned n = 0, i = 0, j;
+    while (s[n] && n < cols) n++;
+    unsigned pad = align == 1 ? (cols - n) / 2 : align == 2 ? cols - n : 0;
+    while (i < pad) buf[i++] = ' ';
+    for (j = 0; j < n; j++) buf[i++] = s[j];
+    while (i < cols) buf[i++] = ' ';
+    buf[i] = 0;
+    return buf;
+}
+"#;
 
 fn describe(p: &Project, w: &Widget, a: Option<&Alloc>) -> Option<String> {
     let vp = || a.map_or(0, |a| a.vp);
@@ -1005,6 +1066,44 @@ mod tests {
         assert!(num.contains(&("vp", Value::Num(0x1010))) && num.contains(&("sp", Value::Num(0x9000))));
         assert!(out.header.contains("#define VP_TEMP") && out.header.contains("#define PAGE_SETTINGS"));
         assert!(out.map.contains("sends key 0x0001 to VP 0x1000") && out.map.contains("goes to page 1"), "{}", out.map);
+    }
+
+    #[test]
+    fn number_and_text_alignment() {
+        let mut p = sample();
+        let ws = &mut p.pages[1].widgets;
+        // box 200 wide, 40 high: font 20 px per digit, 3 digits = a 60 px field
+        let mut num = Widget::new(palette("Number"), "level", 100, 50);
+        (num.w, num.h) = (200, 40);
+        if let WidgetKind::Number { int_digits, dec_digits, align, .. } = &mut num.kind {
+            (*int_digits, *dec_digits, *align) = (3, 0, Align::Right);
+        }
+        let mut centred = num.clone();
+        centred.name = "level2".into();
+        centred.y = 120;
+        if let WidgetKind::Number { align, .. } = &mut centred.kind {
+            *align = Align::Center;
+        }
+        let mut status = Widget::new(palette("Text"), "status2", 100, 200);
+        (status.w, status.h) = (240, 32);
+        if let WidgetKind::Text { align, .. } = &mut status.kind {
+            *align = Align::Center;
+        }
+        ws.extend([num, centred, status]);
+        let out = build(&p, Path::new(".")).unwrap();
+        let nums: Vec<_> = out.set.show.as_ref().unwrap().pages[&1].iter()
+            .filter(|r| crate::control::show_kind(r).unwrap().name == "number")
+            .map(|r| crate::control::show_params(r).unwrap()).collect();
+        assert!(nums[0].contains(&("x", Value::Num(100 + 200 - 60))) && nums[0].contains(&("align", Value::Num(1))), "{:?}", nums[0]);
+        assert!(nums[1].contains(&("x", Value::Num(100 + 70))) && nums[1].contains(&("align", Value::Num(2))), "{:?}", nums[1]);
+        // 240 / (32 / 2) = 15 characters; the padding helper is generated once
+        assert!(out.header.contains("#define COLS_STATUS2") && out.header.contains(" 15  //"), "{}", out.header);
+        let mut q = p.clone();
+        if let WidgetKind::Text { len, .. } = &mut q.pages[1].widgets.last_mut().unwrap().kind {
+            *len = 8; // box fits 15, the VP only 8
+        }
+        assert!(build(&q, Path::new(".")).unwrap().header.contains(" 8  // characters"));
+        assert!(out.header.contains("#define ALIGN_STATUS2") && out.header.matches("ui_align_text(char").count() == 1);
     }
 
     #[test]

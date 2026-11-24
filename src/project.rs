@@ -81,10 +81,46 @@ pub struct Widget {
     pub kind: WidgetKind,
 }
 
+/// Horizontal text alignment inside the widget box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    pub const ALL: [Align; 3] = [Align::Left, Align::Center, Align::Right];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Align::Left => "Left",
+            Align::Center => "Center",
+            Align::Right => "Right",
+        }
+    }
+
+    /// x of something `inner` wide placed in a box at `x`, `outer` wide.
+    pub fn place(self, x: f32, outer: f32, inner: f32) -> f32 {
+        match self {
+            Align::Left => x,
+            Align::Center => x + ((outer - inner) / 2.0).max(0.0),
+            Align::Right => x + (outer - inner).max(0.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WidgetKind {
     /// Static text, baked into the page image.
-    Label { text: String, size: f32, color: Rgb },
+    Label {
+        text: String,
+        size: f32,
+        color: Rgb,
+        #[serde(default)]
+        align: Align,
+    },
     /// Static filled box, baked into the page image.
     Panel { color: Rgb, radius: f32 },
     /// Static picture, baked into the page image.
@@ -123,6 +159,9 @@ pub enum WidgetKind {
         /// the screen's built-in bitmap font.
         #[serde(default)]
         smooth: bool,
+        /// Digits left / centred / right in the box (the screen's own alignment setting).
+        #[serde(default)]
+        align: Align,
     },
     /// Text shown by the screen from a VP (ASCII, `len` bytes). `input`: tap opens a keyboard.
     Text {
@@ -138,6 +177,10 @@ pub enum WidgetKind {
         /// unicode font. Off = plain ASCII with the built-in font 0.
         #[serde(default)]
         unicode: bool,
+        /// DWIN text boxes have no alignment of their own: the MCU pads the text with spaces
+        /// (ui_gen.h has a helper), so the screen and the simulator show it aligned.
+        #[serde(default)]
+        align: Align,
     },
     /// On/off switch. Tapping flips VP between 0 and 1.
     /// `bit` = Some(n): flips only bit n of VP (many toggles can share one VP).
@@ -335,15 +378,15 @@ pub fn default_widgets() -> Vec<(&'static str, WidgetKind)> {
         ("Button", button("Button", Event::Key { vp: None, key: 1 })),
         ("On/Off Button", button("On/Off", Event::Latch { vp: None })),
         ("+ / − Button", button("+", Event::Adjust { target: String::new(), step: 1, min: 0, max: 100, wrap: false, repeat: true })),
-        ("Label", WidgetKind::Label { text: "Label".into(), size: 24.0, color: [255; 3] }),
+        ("Label", WidgetKind::Label { text: "Label".into(), size: 24.0, color: [255; 3], align: Align::Left }),
         ("Panel", WidgetKind::Panel { color: [30, 41, 59], radius: 12.0 }),
-        ("Number", WidgetKind::Number { vp: None, int_digits: 3, dec_digits: 1, color: [255; 3], input: None, smooth: false }),
-        ("Number Input", WidgetKind::Number { vp: None, int_digits: 3, dec_digits: 0, color: [255; 3], input: Some((0, 999)), smooth: false }),
-        ("Big Number", WidgetKind::Number { vp: None, int_digits: 3, dec_digits: 0, color: [255; 3], input: None, smooth: true }),
-        ("Text", WidgetKind::Text { vp: None, len: 20, color: [255; 3], input: false, scroll: false, unicode: false }),
-        ("Scrolling Text", WidgetKind::Text { vp: None, len: 40, color: [255; 3], input: false, scroll: true, unicode: false }),
-        ("Text Input", WidgetKind::Text { vp: None, len: 20, color: [255; 3], input: true, scroll: false, unicode: false }),
-        ("Unicode Text", WidgetKind::Text { vp: None, len: 40, color: [255; 3], input: false, scroll: false, unicode: true }),
+        ("Number", WidgetKind::Number { vp: None, int_digits: 3, dec_digits: 1, color: [255; 3], input: None, smooth: false, align: Align::Left }),
+        ("Number Input", WidgetKind::Number { vp: None, int_digits: 3, dec_digits: 0, color: [255; 3], input: Some((0, 999)), smooth: false, align: Align::Left }),
+        ("Big Number", WidgetKind::Number { vp: None, int_digits: 3, dec_digits: 0, color: [255; 3], input: None, smooth: true, align: Align::Left }),
+        ("Text", WidgetKind::Text { vp: None, len: 20, color: [255; 3], input: false, scroll: false, unicode: false, align: Align::Left }),
+        ("Scrolling Text", WidgetKind::Text { vp: None, len: 40, color: [255; 3], input: false, scroll: true, unicode: false, align: Align::Left }),
+        ("Text Input", WidgetKind::Text { vp: None, len: 20, color: [255; 3], input: true, scroll: false, unicode: false, align: Align::Left }),
+        ("Unicode Text", WidgetKind::Text { vp: None, len: 40, color: [255; 3], input: false, scroll: false, unicode: true, align: Align::Left }),
         ("Toggle", WidgetKind::Toggle { vp: None, on: [34, 197, 94], off: [71, 85, 105], knob: [255; 3], bit: None }),
         ("Lamp", WidgetKind::Lamp { vp: None, bit: None, on: [34, 197, 94], off: [51, 65, 85] }),
         ("Slider", WidgetKind::Slider { vp: None, min: 0, max: 100, track: [71, 85, 105], knob: [255; 3], show_track: true }),

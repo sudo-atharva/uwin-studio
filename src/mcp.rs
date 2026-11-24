@@ -10,30 +10,22 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-const INSTRUCTIONS: &str = r#"UWIN Studio designs touch screens for DWIN T5L (DGUS II) displays and builds the DWIN_SET folder that goes on the display's SD card.
+const INSTRUCTIONS: &str = r#"UWIN Studio designs touch screens for DWIN T5L (DGUS II) displays and builds the DWIN_SET folder for the display's SD card.
 
-Typical job: the user gives a flow chart / list of screens and what each button does. Then:
-1. new_project (path ending in .uwin, screen size) or open_project.
-2. One add_screen per screen in the flow chart. Screens are numbered from 0 in creation order.
-3. add_widget for everything on each screen. widget_types lists every type with its default properties.
-   - Navigation button: type "Button", props {"text": "...", "goto": <screen index>, "event": "None"}.
-   - Button that tells the MCU something: props {"event": {"Key": {"vp": null, "key": 1}}} (sends key to its VP).
-   - On/off button that stays pressed: type "On/Off Button".
-   - +/- button changing a number: type "+ / − Button", props {"event": {"Adjust": {"target": "<number widget name>", "step": 1, "min": 0, "max": 100, "wrap": false, "repeat": true}}}.
-   - Values the MCU shows: Number, Text, Progress, Gauge, Lamp, Icons. Values the user enters: Number Input, Text Input, Toggle, Slider, Knob, Dropdown, List, Roller.
-   - Put a short "comment" on every widget saying what it does for the MCU; it goes into ui_map.txt and ui_gen.h.
-   - Widget names must be unique in the project (they become C #defines). Use snake_case.
-   - Coordinates are pixels, origin top-left. Keep widgets inside the screen and not overlapping (Panels are backgrounds and may contain others).
-   - Leave "vp" null: addresses are assigned automatically. Colors are [r, g, b].
-   - Text widgets: on the screen each character is about h/2 px wide, so a box fits about 2*w/h
-     characters. Make w >= (longest text the MCU will send) * h / 2, or longer texts are cut off.
-   - Layout: use the whole screen with even margins (about 24 px), line things up on a grid, centre titles,
-     group related items on a Panel, make touch targets at least 60 px tall, keep navigation buttons in the
-     same place on every screen, and use the default dark colors unless the user asks otherwise.
-4. screenshot each screen to check the layout, fix with update_widget.
-5. build: writes DWIN_SET, ui_map.txt (all addresses + UART frames) and ui_gen.h. Fix any warnings.
-6. Optionally test: sim_start, sim_tap / sim_drag / sim_type, sim_read, sim_send (frames from the MCU).
-Edits are saved to the .uwin file right away; the UWIN Studio editor shows them after reopening the file."#;
+Keep calls few (each answer costs tokens):
+1. new_project (path ending in .uwin, size) or open_project.
+2. add_screen for each screen (numbered from 0).
+3. ONE add_widget call per screen with a "widgets" list. widget_types lists types and settable props (call it once; type="Button" gives one type's defaults).
+   - Navigation button: "Button", props {"text": "...", "goto": <screen>, "event": "None"}. Key to the MCU: props {"event": {"Key": {"vp": null, "key": 1}}}.
+   - On/off: "On/Off Button". +/-: "+ / − Button" with {"event": {"Adjust": {"target": "<number widget>", "step": 1, "min": 0, "max": 100, "wrap": false, "repeat": true}}}.
+   - MCU shows: Number, Text, Progress, Gauge, Lamp, Icons. User enters: Number Input, Text Input, Toggle, Slider, Knob, Dropdown, List, Roller.
+   - Text position: Label, Number and Text take props {"align": "Left" | "Center" | "Right"}.
+   - Unique snake_case names (they become C #defines); a short "comment" on each MCU widget. Leave "vp" null. Colors [r, g, b].
+   - Text boxes fit about 2*w/h characters. Layout: ~24 px margins, a grid, touch targets >= 60 px tall, nav buttons in the same place on every screen.
+4. screenshot once per screen at the end (not after every change); fix with update_widget (also takes a "widgets" list).
+5. build: writes DWIN_SET, ui_map.txt and ui_gen.h; returns warnings (map=true adds the address map).
+6. Optional: sim_start, sim_tap / sim_drag / sim_type, sim_read, sim_send.
+Edits are saved to the .uwin file at once; reopen it in the editor to see them."#;
 
 struct Server {
     project: Project,
@@ -73,9 +65,9 @@ pub fn serve(input: impl BufRead, mut output: impl Write) {
 }
 
 fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
-    // Every description names the hardware, so a tool search for "DWIN", "DGUS", "HMI"
-    // or "touchscreen" finds these tools without the user naming UWIN Studio.
-    let description = format!("UWIN Studio - DWIN / DGUS II T5L HMI touchscreen display designer. {description}");
+    // Every description names the hardware (briefly: it is repeated for every tool in every
+    // request), so a tool search for "DWIN", "DGUS" or "HMI" finds these tools.
+    let description = format!("DWIN/DGUS HMI: {description}");
     json!({"name": name, "description": description,
            "inputSchema": {"type": "object", "properties": props, "required": required}})
 }
@@ -91,26 +83,28 @@ fn tools() -> Vec<Value> {
         tool("get_project", "Summary of screens and widgets. full=true returns the whole project JSON.", json!({"full": {"type": "boolean"}}), &[]),
         tool("set_project", "Replace the whole project with this JSON (same format as get_project full=true). Fastest way to create many screens at once.",
             json!({"project": {"type": "object"}}), &["project"]),
-        tool("widget_types", "Every widget type with its default properties and size.", json!({}), &[]),
+        tool("widget_types", "Widget types with size and settable props; type=\"Button\" gives that type's defaults.", json!({"type": {"type": "string"}}), &[]),
         tool("add_screen", "Add a screen; returns its index (used by button goto).", json!({
             "name": {"type": "string"}, "bg": {"type": "array", "items": {"type": "integer"}, "description": "Background [r,g,b]"}}), &["name"]),
         tool("update_screen", "Rename a screen, change its background, or set which screens a finger swipe opens.", json!({
             "screen": screen, "name": {"type": "string"}, "bg": {"type": "array", "items": {"type": "integer"}},
             "swipe_left": int("Screen opened by swiping left (-1 = none)"), "swipe_right": int("Screen opened by swiping right (-1 = none)")}), &["screen"]),
         tool("remove_screen", "Delete a screen (later screens move down by one; goto targets are fixed up).", json!({"screen": screen}), &["screen"]),
-        tool("add_widget", "Add a widget to a screen.", json!({
-            "screen": screen, "type": {"type": "string", "description": "Name from widget_types, e.g. \"Button\""},
-            "name": {"type": "string", "description": "Unique snake_case name"}, "x": int("Left"), "y": int("Top"),
-            "w": int("Width (default: type's default)"), "h": int("Height"), "comment": {"type": "string"}, "props": props}),
-            &["screen", "type", "name", "x", "y"]),
-        tool("update_widget", "Change a widget found by name: position, size, comment, new name, or type properties.", json!({
+        tool("add_widget", "Add widgets: one (type, name, x, y...) or a whole screen at once with widgets=[{type, name, x, y, w, h, comment, props}].", json!({
+            "screen": screen, "widgets": {"type": "array", "items": {"type": "object"}, "description": "Many widgets in one call (fields as below)"},
+            "type": {"type": "string", "description": "From widget_types, e.g. \"Button\""},
+            "name": {"type": "string", "description": "Unique snake_case"}, "x": int("Left"), "y": int("Top"),
+            "w": int("Width (default: the type's)"), "h": int("Height"), "comment": {"type": "string"}, "props": props}),
+            &["screen"]),
+        tool("update_widget", "Change widgets by name (position, size, comment, new_name, props); many at once with widgets=[...].", json!({
+            "widgets": {"type": "array", "items": {"type": "object"}},
             "name": {"type": "string"}, "new_name": {"type": "string"}, "x": int(""), "y": int(""), "w": int(""), "h": int(""),
-            "comment": {"type": "string"}, "props": props}), &["name"]),
+            "comment": {"type": "string"}, "props": props}), &[]),
         tool("remove_widget", "Delete a widget by name.", json!({"name": {"type": "string"}}), &["name"]),
-        tool("build", "Build DWIN_SET + ui_map.txt + ui_gen.h into out_dir (default: 'build' next to the project). Returns warnings and the address map.",
-            json!({"out_dir": {"type": "string"}}), &[]),
-        tool("screenshot", "PNG of a screen as designed, or of the running simulator when screen is omitted and sim_start was called.",
-            json!({"screen": screen}), &[]),
+        tool("build", "Build DWIN_SET + ui_map.txt + ui_gen.h into out_dir (default: 'build' next to the project). Returns warnings; map=true adds the address map.",
+            json!({"out_dir": {"type": "string"}, "map": {"type": "boolean"}}), &[]),
+        tool("screenshot", "Picture of a screen as designed (or of the running simulator when screen is omitted). Max 640 px unless full=true.",
+            json!({"screen": screen, "full": {"type": "boolean"}}), &[]),
         tool("sim_start", "Start the simulator (the screen behaves like the real display).", json!({"screen": screen}), &[]),
         tool("sim_tap", "Tap at x,y on the simulated screen. Returns frames sent to the MCU, the current screen and any open keypad/list.",
             json!({"x": int(""), "y": int("")}), &["x", "y"]),
@@ -233,6 +227,84 @@ impl Server {
         s
     }
 
+    /// Run `f` for every item of a["widgets"] (or for `a` itself), save once, one line per item.
+    /// Items that fail are reported and the rest still run.
+    fn each(&mut self, a: &Value, verb: &str, mut f: impl FnMut(&mut Self, &Value) -> Result<String, String>) -> Result<String, String> {
+        let items: Vec<Value> = match a.get("widgets").and_then(Value::as_array) {
+            Some(list) => list.clone(),
+            None => vec![a.clone()],
+        };
+        let (mut lines, mut failed) = (vec![], 0);
+        for (i, item) in items.iter().enumerate() {
+            match f(self, item) {
+                Ok(l) => lines.push(l),
+                Err(e) => {
+                    failed += 1;
+                    lines.push(format!("item {i} ({}): ERROR {e}", item["name"].as_str().unwrap_or("?")));
+                }
+            }
+        }
+        if failed == items.len() {
+            return Err(lines.join("
+"));
+        }
+        Ok(format!("{} {verb}{}
+{}", items.len() - failed, self.save()?, lines.join("
+")))
+    }
+
+    fn add_one(&mut self, a: &Value, item: &Value) -> Result<String, String> {
+        let s = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+        // screen per item, else the call's screen
+        let pi = self.screen(item.get("screen").unwrap_or(&a["screen"]))?;
+        let ty = s("type").ok_or("type missing")?;
+        let name = s("name").ok_or("name missing")?;
+        if self.find(&name).is_ok() {
+            return Err(format!("a widget named '{name}' already exists"));
+        }
+        let kind = match default_widgets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&ty)) {
+            Some((_, k)) => k,
+            None if ty.eq_ignore_ascii_case("image") => WidgetKind::Image { path: String::new() },
+            None => {
+                let names: Vec<_> = default_widgets().into_iter().map(|(n, _)| n).collect();
+                return Err(format!("unknown type '{ty}'; types: {}, Image", names.join(", ")));
+            }
+        };
+        let kind = merge_kind(&kind, &item["props"])?;
+        let mut w = Widget::new(kind, &name, int(item, "x").unwrap_or(0), int(item, "y").unwrap_or(0));
+        w.w = int(item, "w").unwrap_or(w.w);
+        w.h = int(item, "h").unwrap_or(w.h);
+        w.comment = s("comment").unwrap_or_default();
+        let msg = format!("{} '{name}' {},{} {}x{} screen {pi}", w.kind_name(), w.x, w.y, w.w, w.h);
+        self.project.pages[pi].widgets.push(w);
+        Ok(msg)
+    }
+
+    fn update_one(&mut self, a: &Value) -> Result<String, String> {
+        let s = |k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
+        let name = s("name").ok_or("name missing")?;
+        let (pi, wi) = self.find(&name)?;
+        if let Some(n) = s("new_name").filter(|n| *n != name) {
+            if self.find(&n).is_ok() {
+                return Err(format!("a widget named '{n}' already exists"));
+            }
+        }
+        let w = &mut self.project.pages[pi].widgets[wi];
+        w.kind = merge_kind(&w.kind, &a["props"])?;
+        for (k, f) in [("x", &mut w.x), ("y", &mut w.y), ("w", &mut w.w), ("h", &mut w.h)] {
+            if let Some(v) = int(a, k) {
+                *f = v;
+            }
+        }
+        if let Some(c) = s("comment") {
+            w.comment = c;
+        }
+        if let Some(n) = s("new_name") {
+            w.name = n;
+        }
+        Ok(format!("'{}' {},{} {}x{}", w.name, w.x, w.y, w.w, w.h))
+    }
+
     fn call(&mut self, name: &str, a: &Value) -> Result<Vec<Value>, String> {
         let s = |a: &Value, k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
         let msg = match name {
@@ -263,13 +335,29 @@ impl Server {
                 format!("project replaced{}\n{}", self.save()?, self.summary())
             }
             "widget_types" => {
-                let list: Vec<Value> = default_widgets().into_iter().map(|(n, k)| {
+                let detail = s(a, "type");
+                let mut out = String::new();
+                for (n, k) in default_widgets() {
                     let w = Widget::new(k.clone(), "x", 0, 0);
-                    json!({"type": n, "default_size": [w.w, w.h], "props": serde_json::to_value(&k).unwrap().as_object().unwrap().values().next()})
-                }).collect();
-                let mut out = serde_json::to_string(&list).unwrap();
-                out += "\nAlso: \"Image\" with props {\"path\": \"assets/picture.png\"} (relative to the project file).";
-                out += "\nButton event: \"None\" | {\"Key\": {\"vp\": null, \"key\": n}} | {\"Latch\": {\"vp\": null}} | {\"Adjust\": {\"target\": name, \"step\": n, \"min\": n, \"max\": n, \"wrap\": bool, \"repeat\": bool}}; goto = screen index or null.";
+                    let props = serde_json::to_value(&k).unwrap();
+                    let props = props.as_object().and_then(|o| o.values().next()).cloned().unwrap_or(Value::Null);
+                    match &detail {
+                        Some(t) if t.eq_ignore_ascii_case(n) => out += &format!("{n} {}x{} defaults: {props}\n", w.w, w.h),
+                        Some(_) => {}
+                        None => {
+                            let keys: Vec<_> = props.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+                            out += &format!("{n} {}x{}: {}\n", w.w, w.h, keys.join(" "));
+                        }
+                    }
+                }
+                match &detail {
+                    Some(t) if out.is_empty() => return Err(format!("no type {t:?}; call widget_types without type for the list")),
+                    Some(_) => {}
+                    None => {
+                        out += "Image: path (relative to the project file)\n";
+                        out += "Button event: \"None\" | {\"Key\": {\"vp\": null, \"key\": n}} | {\"Latch\": {\"vp\": null}} | {\"Adjust\": {\"target\": name, \"step\": n, \"min\": n, \"max\": n, \"wrap\": bool, \"repeat\": bool}}; goto = screen or null. align = \"Left\" | \"Center\" | \"Right\".";
+                    }
+                }
                 out
             }
             "add_screen" => {
@@ -322,54 +410,8 @@ impl Server {
                 self.sim = None;
                 format!("removed screen {i}{}", self.save()?)
             }
-            "add_widget" => {
-                let pi = self.screen(&a["screen"])?;
-                let ty = s(a, "type").ok_or("type missing")?;
-                let name = s(a, "name").ok_or("name missing")?;
-                if self.find(&name).is_ok() {
-                    return Err(format!("a widget named '{name}' already exists"));
-                }
-                let kind = match default_widgets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&ty)) {
-                    Some((_, k)) => k,
-                    None if ty.eq_ignore_ascii_case("image") => WidgetKind::Image { path: String::new() },
-                    None => {
-                        let names: Vec<_> = default_widgets().into_iter().map(|(n, _)| n).collect();
-                        return Err(format!("unknown type '{ty}'; types: {}, Image", names.join(", ")));
-                    }
-                };
-                let kind = merge_kind(&kind, &a["props"])?;
-                let mut w = Widget::new(kind, &name, int(a, "x").unwrap_or(0), int(a, "y").unwrap_or(0));
-                w.w = int(a, "w").unwrap_or(w.w);
-                w.h = int(a, "h").unwrap_or(w.h);
-                w.comment = s(a, "comment").unwrap_or_default();
-                let msg = format!("added {} '{name}' at {},{} {}x{} on screen {pi}", w.kind_name(), w.x, w.y, w.w, w.h);
-                self.project.pages[pi].widgets.push(w);
-                format!("{msg}{}", self.save()?)
-            }
-            "update_widget" => {
-                let name = s(a, "name").ok_or("name missing")?;
-                let (pi, wi) = self.find(&name)?;
-                if let Some(n) = s(a, "new_name").filter(|n| *n != name) {
-                    if self.find(&n).is_ok() {
-                        return Err(format!("a widget named '{n}' already exists"));
-                    }
-                }
-                let w = &mut self.project.pages[pi].widgets[wi];
-                w.kind = merge_kind(&w.kind, &a["props"])?;
-                for (k, f) in [("x", &mut w.x), ("y", &mut w.y), ("w", &mut w.w), ("h", &mut w.h)] {
-                    if let Some(v) = int(a, k) {
-                        *f = v;
-                    }
-                }
-                if let Some(c) = s(a, "comment") {
-                    w.comment = c;
-                }
-                if let Some(n) = s(a, "new_name") {
-                    w.name = n;
-                }
-                let msg = format!("updated '{}': {},{} {}x{}", w.name, w.x, w.y, w.w, w.h);
-                format!("{msg}{}", self.save()?)
-            }
+            "add_widget" => self.each(a, "added", |me, item| me.add_one(a, item))?,
+            "update_widget" => self.each(a, "updated", |me, item| me.update_one(item))?,
             "remove_widget" => {
                 let name = s(a, "name").ok_or("name missing")?;
                 let (pi, wi) = self.find(&name)?;
@@ -383,8 +425,9 @@ impl Server {
                 std::fs::write(out.join("ui_gen.h"), &o.header).map_err(|e| e.to_string())?;
                 std::fs::write(out.join("ui_map.txt"), &o.map).map_err(|e| e.to_string())?;
                 let warn = if o.warnings.is_empty() { "no warnings".into() } else { format!("WARNINGS:\n{}", o.warnings.join("\n")) };
-                format!("built {} screen(s) into {}\nCopy DWIN_SET to the SD card; include ui_gen.h in the MCU code.\n{warn}\n\n{}",
-                    self.project.pages.len(), out.display(), o.map)
+                let map = if a["map"].as_bool() == Some(true) { format!("\n\n{}", o.map) } else { "\n(address map: ui_map.txt, or build with map=true)".into() };
+                format!("built {} screen(s) into {}\nCopy DWIN_SET to the SD card; include ui_gen.h in the MCU code.\n{warn}{map}",
+                    self.project.pages.len(), out.display())
             }
             "screenshot" => {
                 let base = self.base();
@@ -396,8 +439,16 @@ impl Server {
                         (render(&p.pages[i], p.width, p.height, Mode::Preview, &base), format!("screen {i} '{}'", p.pages[i].name))
                     }
                 };
+                // a picture costs tokens by its pixel count: 640 px is enough to check a layout
+                let mut img = to_image(&px);
+                let long = img.width().max(img.height());
+                if long > 640 && a["full"].as_bool() != Some(true) {
+                    let k = 640.0 / long as f32;
+                    let (nw, nh) = ((img.width() as f32 * k) as u32, (img.height() as f32 * k) as u32);
+                    img = img.resize_exact(nw, nh, image::imageops::FilterType::Triangle);
+                }
                 let mut png = std::io::Cursor::new(vec![]);
-                to_image(&px).write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+                img.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
                 return Ok(vec![text(what), json!({"type": "image", "data": base64(png.get_ref()), "mimeType": "image/png"})]);
             }
             "sim_start" => {
@@ -509,7 +560,7 @@ mod tests {
         assert_eq!(r[0]["result"]["serverInfo"]["name"], "uwin-studio");
         assert!(r[1]["result"]["tools"].as_array().unwrap().len() >= 15);
         let txt = |i: usize| r[i]["result"]["content"][0]["text"].as_str().unwrap().to_string();
-        assert!(txt(4).contains("added Button 'to_settings'"), "{}", txt(4));
+        assert!(txt(4).contains("1 added") && txt(4).contains("Button 'to_settings'"), "{}", txt(4));
         assert_eq!(r[6]["result"]["isError"], true);
         assert!(txt(6).contains("no property 'colour'"));
         // Tap 1 goes to screen 1; tap 2 hits 'start' there and sends its key.
@@ -522,5 +573,36 @@ mod tests {
         assert!(matches!(&saved.pages[1].widgets[0].kind, WidgetKind::Button { text, .. } if text == "GO"));
         assert_eq!(saved.pages[1].widgets[0].x, 40);
         assert!(txt(13).contains("start (screen 1"), "{}", txt(13));
+    }
+
+    #[test]
+    fn whole_screen_in_one_call() {
+        let dir = std::env::temp_dir().join("uwin_mcp_batch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("b.uwin");
+        let r = rpc(&[
+            call(1, "new_project", json!({"path": path})),
+            call(2, "add_widget", json!({"screen": 0, "widgets": [
+                {"type": "Label", "name": "title", "x": 24, "y": 24, "w": 752, "props": {"text": "Pump", "align": "Center"}},
+                {"type": "Number", "name": "flow", "x": 24, "y": 100, "props": {"align": "Right"}},
+                {"type": "Nope", "name": "bad", "x": 0, "y": 0},
+            ]})),
+            call(3, "update_widget", json!({"widgets": [{"name": "flow", "x": 40}, {"name": "title", "props": {"align": "Left"}}]})),
+            call(4, "widget_types", json!({})),
+            call(5, "widget_types", json!({"type": "label"})),
+            call(6, "screenshot", json!({"screen": 0})),
+        ]);
+        let txt = |i: usize| r[i]["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(txt(1).starts_with("2 added") && txt(1).contains("item 2 (bad): ERROR unknown type"), "{}", txt(1));
+        assert!(txt(2).starts_with("2 updated"), "{}", txt(2));
+        assert!(txt(3).contains("Label 160x32: align color size text"), "{}", txt(3));
+        assert!(txt(4).starts_with("Label 160x32 defaults:"), "{}", txt(4));
+        let saved: Project = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.pages[0].widgets.len(), 2);
+        assert!(matches!(saved.pages[0].widgets[1].kind, WidgetKind::Number { align: crate::project::Align::Right, .. }));
+        assert_eq!(saved.pages[0].widgets[1].x, 40);
+        // 800 x 480 is sent at 640 x 384
+        let png = r[5]["result"]["content"][1]["data"].as_str().unwrap();
+        assert!(png.len() < 200_000);
     }
 }

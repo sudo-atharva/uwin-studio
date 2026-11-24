@@ -48,7 +48,12 @@ that does the whole job, in an editor that feels like VS Code or EEZ Studio.
   keyboard, lists, sliders, page changes. The UART log shows every frame.
 - **PC as the screen:** in the simulator, pick a COM port. Your MCU board talks to the
   PC exactly as it would to the display, so you can write firmware before the display
-  arrives.
+  arrives. The UART log says what each frame means (`write VP 0x1000 temp = 42`, `page → 2`),
+  shows text the MCU prints (debug output) instead of dropping it, and skips noise and
+  half frames instead of getting stuck on them.
+- **Text alignment:** Labels, Numbers and Text boxes can be left, centred or right. Numbers use
+  the screen's own alignment; for Text (which DWIN can't align) `ui_gen.h` gets
+  `ui_align_text()` and the box width in characters, so the MCU pads the text.
 - **Import DGUS projects:** opens an existing `DWIN_SET` folder as an editable project.
   Your MCU firmware keeps working after a rebuild: page numbers (including unused
   ones), VP addresses, button keys, pressed looks and `T5LCFG.CFG` stay exactly as they were.
@@ -170,14 +175,15 @@ Then ask, for example:
 | Tools | |
 |---|---|
 | `new_project`, `open_project`, `get_project`, `set_project` | create, load, read, or replace a whole project |
-| `widget_types` | every widget type with its properties |
+| `widget_types` | widget types and their properties (`type` for one type's defaults) |
 | `add_screen`, `update_screen`, `remove_screen` | screens, backgrounds, swipe targets |
-| `add_widget`, `update_widget`, `remove_widget` | widgets: position, size, text, colors, button actions, comments |
-| `build` | writes `DWIN_SET`, `ui_map.txt`, `ui_gen.h` and returns warnings |
-| `screenshot` | PNG of a screen, or of the running simulator |
+| `add_widget`, `update_widget`, `remove_widget` | widgets: position, size, text, colors, button actions, comments; a whole screen in one call with `widgets: [...]` |
+| `build` | writes `DWIN_SET`, `ui_map.txt`, `ui_gen.h` and returns warnings (`map: true` adds the address map) |
+| `screenshot` | picture of a screen or the running simulator (640 px unless `full: true`) |
 | `sim_start`, `sim_tap`, `sim_drag`, `sim_type`, `sim_send`, `sim_read` | run the simulator: touch, type, MCU frames, read values |
 
-Every edit is saved to the `.uwin` file right away. Open the file in the editor to see the
+Answers are kept short because they cost the assistant tokens: one `add_widget` call per screen,
+one screenshot per screen at the end. Every edit is saved to the `.uwin` file right away. Open the file in the editor to see the
 result or keep working on it by hand.
 
 Without MCP, agents can still write `.uwin` files directly (plain JSON), build with

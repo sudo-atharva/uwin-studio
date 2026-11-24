@@ -5,7 +5,7 @@
 //! Anything not understood is listed in the report instead of being guessed.
 
 use crate::control::{show_kind, show_params, Value};
-use crate::project::{Event, Page, Project, Widget, WidgetKind};
+use crate::project::{Align, Event, Page, Project, Widget, WidgetKind};
 use crate::set::DwinSet;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -95,12 +95,14 @@ pub fn import(dir: &Path, project_dir: &Path) -> Result<(Project, Vec<String>), 
                     let kind = WidgetKind::Number {
                         vp: Some(vp), int_digits: num(&p, "int_digits") as u8, dec_digits: num(&p, "dec_digits") as u8,
                         color: rgb(num(&p, "color")), input: None, smooth: false,
+                        // the box is exactly the number field, so the screen's alignment carries over as is
+                        align: dgus_align(num(&p, "align")),
                     };
                     widget(kind, format!("num_{vp:04x}"), x, y, f * digits, 2 * f, String::new())
                 }
                 "text" => {
                     let (x0, y0) = (num(&p, "box_x0"), num(&p, "box_y0"));
-                    let kind = WidgetKind::Text { vp: Some(vp), len: num(&p, "length") as u16, color: rgb(num(&p, "color")), input: false, scroll: false, unicode: num(&p, "encode") & 0x7F == 5 };
+                    let kind = WidgetKind::Text { vp: Some(vp), len: num(&p, "length") as u16, color: rgb(num(&p, "color")), input: false, scroll: false, unicode: num(&p, "encode") & 0x7F == 5, align: Align::Left };
                     widget(kind, format!("text_{vp:04x}"), x0, y0, num(&p, "box_x1") - x0, num(&p, "box_y1") - y0, String::new())
                 }
                 "var_icon" => {
@@ -269,4 +271,14 @@ mod tests {
         }
     }
     use std::path::Path;
+}
+
+/// DGUS number alignment byte: 0 left, 1 right, 2 centre.
+// ponytail: byte values from DWIN's T5L guide (DGUS's own help only names left/right/centre); confirm on a display
+pub(crate) fn dgus_align(v: u32) -> Align {
+    match v {
+        1 => Align::Right,
+        2 => Align::Center,
+        _ => Align::Left,
+    }
 }

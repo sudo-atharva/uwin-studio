@@ -13,7 +13,7 @@ fn w(kind: WidgetKind, name: &str, (x, y, ww, h): (i32, i32, i32, i32), comment:
 }
 
 fn label(name: &str, text: &str, size: f32, at: (i32, i32, i32, i32)) -> Widget {
-    w(WidgetKind::Label { text: text.into(), size, color: [203, 213, 225] }, name, at, "")
+    w(WidgetKind::Label { text: text.into(), size, color: [203, 213, 225], align: Default::default() }, name, at, "")
 }
 
 fn panel(name: &str, at: (i32, i32, i32, i32)) -> Widget {

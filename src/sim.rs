@@ -43,6 +43,11 @@ pub struct Sim {
     pub out: Vec<Vec<u8>>,
     pub log: Vec<String>,
     rx: Vec<u8>,
+    /// When the partial frame in `rx` started arriving (dropped if it never completes).
+    rx_since: Option<Instant>,
+    /// Bytes from the MCU that are not DWIN frames (debug prints, noise), shown in the log.
+    other: Vec<u8>,
+    other_since: Option<Instant>,
     curves: [Vec<i16>; 8],
     /// Widget index being held (slider drag, button highlight).
     pub held: Option<usize>,
@@ -54,6 +59,14 @@ pub struct Sim {
     pub clock_offset: i64,
 }
 
+/// ASCII text of a VP write, stopping at the DWIN end marker (FF FF) or a 0 byte.
+fn printable(b: &[u8]) -> String {
+    let end = b.windows(2).position(|w| w == [0xFF, 0xFF]).unwrap_or(b.len());
+    let b = &b[..end];
+    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    b[..end].iter().map(|&c| if c.is_ascii_graphic() || c == b' ' { c as char } else { '.' }).collect()
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
 }
@@ -62,6 +75,7 @@ impl Sim {
     pub fn new(p: &Project) -> Self {
         let mut s = Sim {
             page: 0, mem: vec![0; 0x20000], allocs: allocate(p).0, out: vec![], log: vec![], rx: vec![],
+            rx_since: None, other: vec![], other_since: None,
             curves: Default::default(), held: None, popup: None, clock_offset: 0, down_x: 0, start: Instant::now(),
         };
         for a in s.allocs.clone() {
@@ -114,8 +128,74 @@ impl Sim {
     }
 
     fn emit(&mut self, frame: Vec<u8>) {
-        self.log.push(format!("→ MCU  {}", hex(&frame)));
+        self.log.push(format!("→ MCU  {}{}", hex(&frame), self.meaning(&frame)));
         self.out.push(frame);
+    }
+
+    fn vp_name(&self, vp: u16) -> String {
+        self.allocs.iter().find(|a| vp >= a.vp && vp < a.vp + a.words.max(1)).map_or(String::new(), |a| format!(" {}", a.name))
+    }
+
+    /// Plain-language meaning of a DWIN frame, for the log: "   | write VP 0x1000 temp = 42".
+    fn meaning(&self, f: &[u8]) -> String {
+        if f.len() == 6 && f[3..] == [0x82, 0x4F, 0x4B] {
+            return "   | OK (write acknowledged)".into();
+        }
+        if f.len() < 6 {
+            return String::new();
+        }
+        let vp = u16::from_be_bytes([f[4], f[5]]);
+        let data = &f[6..];
+        let what = match f[3] {
+            0x82 if vp == 0x0084 && data.len() >= 4 && data[..2] == [0x5A, 0x01] => format!("page → {}", u16::from_be_bytes([data[2], data[3]])),
+            0x82 if data.len() == 2 => format!("write VP {vp:#06x}{} = {}", self.vp_name(vp), i16::from_be_bytes([data[0], data[1]])),
+            0x82 if data.iter().any(|b| b.is_ascii_graphic()) => format!("write VP {vp:#06x}{} = \"{}\"", self.vp_name(vp), printable(data)),
+            0x82 => format!("write VP {vp:#06x}{} ({} bytes)", self.vp_name(vp), data.len()),
+            0x83 if data.len() == 1 => format!("read VP {vp:#06x}{} ({} word(s))", self.vp_name(vp), data[0]),
+            0x83 if data.len() >= 3 => format!("VP {vp:#06x}{} = {}", self.vp_name(vp), i16::from_be_bytes([data[1], data[2]])),
+            _ => return String::new(),
+        };
+        format!("   | {what}")
+    }
+
+    /// Bytes that are not part of a DWIN frame: collected and logged as one line.
+    fn other_bytes(&mut self, b: &[u8]) {
+        if b.is_empty() {
+            return;
+        }
+        self.other.extend_from_slice(b);
+        self.other_since.get_or_insert_with(Instant::now);
+        if self.other.contains(&b'\n') || self.other.len() >= 64 {
+            self.flush_other();
+        }
+    }
+
+    fn flush_other(&mut self) {
+        if self.other.is_empty() {
+            return;
+        }
+        let b = std::mem::take(&mut self.other);
+        self.other_since = None;
+        let text = b.iter().filter(|c| !matches!(c, b'\r' | b'\n')).all(|c| c.is_ascii_graphic() || *c == b' ');
+        self.log.push(if text {
+            format!("← MCU  text: \"{}\"   | not a DWIN frame (debug print?)", String::from_utf8_lossy(&b).trim_end())
+        } else {
+            format!("← MCU  {}   | not a DWIN frame (wrong baud rate or noise?)", hex(&b))
+        });
+    }
+
+    /// Call often (every UI frame): drops a frame that started but never finished (lost bytes,
+    /// MCU reset), so the next frames get through, and shows leftover text without a newline.
+    pub fn tick(&mut self) {
+        if self.rx_since.is_some_and(|t| t.elapsed().as_millis() > 300) {
+            self.log.push(format!("← MCU  {}   | incomplete frame dropped (bytes lost?)", hex(&self.rx)));
+            self.rx.drain(..1.min(self.rx.len()));
+            self.rx_since = None;
+            self.feed(&[]); // look for the next frame in what is left
+        }
+        if self.other_since.is_some_and(|t| t.elapsed().as_millis() > 100) {
+            self.flush_other();
+        }
     }
 
     /// Tell the MCU a VP changed: 5A A5 len 83 VP n words.
@@ -400,29 +480,61 @@ impl Sim {
         self.send(vp);
     }
 
-    /// Bytes from the MCU. Complete frames are applied; the rest waits for more.
+    /// Bytes from the MCU. Complete frames are applied; the rest waits for more. Anything that is
+    /// not a DWIN frame (MCU debug prints, noise) is logged instead of silently dropped, and a
+    /// stray 5A A5 with an impossible length or command can't hold up the frames after it.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.rx.extend_from_slice(bytes);
         loop {
             match self.rx.windows(2).position(|w| w == [0x5A, 0xA5]) {
-                Some(0) => {}
-                Some(i) => drop(self.rx.drain(..i)),
+                Some(i) => {
+                    let junk: Vec<u8> = self.rx.drain(..i).collect();
+                    self.other_bytes(&junk);
+                }
                 None => {
                     let keep = self.rx.last() == Some(&0x5A);
-                    self.rx.clear();
+                    let mut junk = std::mem::take(&mut self.rx);
                     if keep {
+                        junk.pop();
                         self.rx.push(0x5A);
                     }
+                    self.other_bytes(&junk);
+                    self.rx_since = None;
                     return;
                 }
             }
-            if self.rx.len() < 3 || self.rx.len() < 3 + self.rx[2] as usize {
+            if self.rx.len() < 4 {
+                self.rx_since.get_or_insert_with(Instant::now);
                 return;
             }
-            let frame: Vec<u8> = self.rx.drain(..3 + self.rx[2] as usize).collect();
-            self.log.push(format!("← MCU  {}", hex(&frame)));
+            // MCU -> screen frames are 82 (write: VP + data, len >= 5) or 83 (read: VP + count, len 4)
+            let (len, cmd) = (self.rx[2] as usize, self.rx[3]);
+            if !matches!((cmd, len), (0x82, 5..) | (0x83, 4)) {
+                let b = self.rx.remove(0);
+                self.other_bytes(&[b]);
+                continue;
+            }
+            if self.rx.len() < 3 + len {
+                self.rx_since.get_or_insert_with(Instant::now);
+                return;
+            }
+            self.rx_since = None;
+            self.flush_other();
+            let frame: Vec<u8> = self.rx.drain(..3 + len).collect();
+            self.log.push(format!("← MCU  {}{}", hex(&frame), self.meaning(&frame)));
             self.apply(&frame[3..]);
         }
+    }
+
+    /// Something that changes whenever the picture would: re-render only then.
+    pub fn state_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.page, self.held, &self.mem, &self.curves, self.clock_offset).hash(&mut h);
+        if let Some(p) = &self.popup {
+            (p.field, &p.typed, p.caps, p.pos).hash(&mut h);
+        }
+        h.finish()
     }
 
     fn apply(&mut self, f: &[u8]) {
@@ -546,9 +658,9 @@ impl Sim {
                     k.x += (frac(*min as f32, *max as f32) * (w.w - w.h) as f32) as i32;
                     draw_state(&mut px, &k, 0, base);
                 }
-                WidgetKind::Number { dec_digits, color, .. } => {
+                WidgetKind::Number { dec_digits, color, align, .. } => {
                     let n = v as i16 as f64 / 10f64.powi(*dec_digits as i32);
-                    text(&mut px, &format!("{n:.*}", *dec_digits as usize), x, y, hh, *color);
+                    crate::render::aligned(&mut px, &format!("{n:.*}", *dec_digits as usize), w, *align, *color);
                 }
                 WidgetKind::Text { len, color, unicode, .. } => {
                     let s = self.vp(self.page, wi).map_or(String::new(), |vp| {
@@ -676,6 +788,29 @@ mod tests {
 
     fn kind(name: &str) -> WidgetKind {
         default_widgets().into_iter().find(|(n, _)| *n == name).unwrap().1
+    }
+
+    #[test]
+    fn noisy_serial_link() {
+        let p = Project::default();
+        let mut s = Sim::new(&p);
+        // debug text, then a real write, then a stray "5A A5" with an impossible length, then a page switch
+        s.feed(b"boot ok
+");
+        s.feed(&[0x5A, 0xA5, 0x05, 0x82, 0x10, 0x00, 0x00, 0x2A]);
+        s.feed(&[0x5A, 0xA5, 0xFF, 0x13, 0x5A, 0xA5, 0x07, 0x82, 0x00, 0x84, 0x5A, 0x01, 0x00, 0x02]);
+        assert_eq!(s.get(0x1000), 42);
+        assert_eq!(s.page, 2, "the frame after the fake header still gets through");
+        assert!(s.log.iter().any(|l| l.contains("text: \"boot ok\"")), "{:?}", s.log);
+        assert!(s.log.iter().any(|l| l.contains("write VP 0x1000") && l.contains("= 42")), "{:?}", s.log);
+        assert!(s.log.iter().any(|l| l.contains("page → 2")), "{:?}", s.log);
+        // half a frame (MCU reset mid-frame) is dropped after 300 ms, the next one works
+        s.feed(&[0x5A, 0xA5, 0x05, 0x82, 0x10]);
+        s.rx_since = Some(Instant::now() - std::time::Duration::from_millis(400));
+        s.tick();
+        assert!(s.log.iter().any(|l| l.contains("incomplete frame dropped")), "{:?}", s.log);
+        s.feed(&[0x5A, 0xA5, 0x05, 0x82, 0x10, 0x00, 0x00, 0x07]);
+        assert_eq!(s.get(0x1000), 7);
     }
 
     #[test]

@@ -91,6 +91,12 @@ pub(crate) fn frect(w: &Widget) -> (f32, f32, f32, f32) {
     (w.x as f32, w.y as f32, w.w as f32, w.h as f32)
 }
 
+/// Text of the widget's height, left / centred / right in its box.
+pub fn aligned(px: &mut Pixmap, s: &str, w: &Widget, align: crate::project::Align, color: Rgb) {
+    let size = w.h as f32;
+    text(px, s, align.place(w.x as f32, w.w as f32, text_width(s, size)), w.y as f32, size, color);
+}
+
 pub fn text_width(text: &str, size: f32) -> f32 {
     let f = font();
     let sf = f.as_scaled(PxScale::from(size));
@@ -268,7 +274,10 @@ pub fn render(page: &Page, width: u16, height: u16, mode: Mode, base: &Path) -> 
     for w in &page.widgets {
         match &w.kind {
             WidgetKind::Panel { color, radius } => rounded(&mut px, frect(w), *radius, *color),
-            WidgetKind::Label { text: t, size, color } => text(&mut px, t, w.x as f32, w.y as f32, *size, *color),
+            WidgetKind::Label { text: t, size, color, align } => {
+                let x = align.place(w.x as f32, w.w as f32, text_width(t, *size));
+                text(&mut px, t, x, w.y as f32, *size, *color)
+            }
             WidgetKind::Image { path } => match load_image(base, path) {
                 Some(img) => picture(&mut px, &img, w.rect(), 1.0),
                 None => missing(&mut px, w),
@@ -373,7 +382,7 @@ pub fn render(page: &Page, width: u16, height: u16, mode: Mode, base: &Path) -> 
             WidgetKind::Number { input: Some(_), .. } | WidgetKind::Text { input: true, .. } if mode != Mode::Preview => {
                 rounded(&mut px, frect(w), 6.0, [30, 41, 59]);
             }
-            WidgetKind::Number { int_digits, dec_digits, color, input, .. } if mode == Mode::Preview => {
+            WidgetKind::Number { int_digits, dec_digits, color, input, align, .. } if mode == Mode::Preview => {
                 if input.is_some() {
                     rounded(&mut px, frect(w), 6.0, [30, 41, 59]);
                 }
@@ -381,13 +390,14 @@ pub fn render(page: &Page, width: u16, height: u16, mode: Mode, base: &Path) -> 
                 if *dec_digits > 0 {
                     s += &format!(".{}", "8".repeat(*dec_digits as usize));
                 }
-                text(&mut px, &s, w.x as f32, w.y as f32, w.h as f32, *color);
+                aligned(&mut px, &s, w, *align, *color);
             }
-            WidgetKind::Text { color, input, .. } if mode == Mode::Preview => {
+            WidgetKind::Text { color, input, align, .. } if mode == Mode::Preview => {
                 if *input {
                     rounded(&mut px, frect(w), 6.0, [30, 41, 59]);
                 }
-                text(&mut px, &w.name, w.x as f32, w.y as f32, w.h as f32, *color)
+                // as the MCU will send it: padded to the box by ui_align_text
+                aligned(&mut px, &w.name, w, *align, *color)
             }
             _ => {}
         }
